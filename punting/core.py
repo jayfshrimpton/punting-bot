@@ -141,8 +141,10 @@ def validate(d, config):
             if p["market"] == "fixed_win" and p["commission"] not in {None, 0}:
                 raise Invalid("Fixed odds do not use exchange commission")
         ids = set()
+        # Exchange quotes may also record the best lay offer, so thin markets can be recognised.
+        lay = ("lay_odds", "lay_size") if kind == "quotes" and p["market"] == "exchange_back_win" else ()
         for r in p["rows"]:
-            keys(r, ("runner_id", "name", "rated_price") if kind == "model" else ("runner_id", "name", "odds", "size"))
+            keys(r, ("runner_id", "name", "rated_price") if kind == "model" else ("runner_id", "name", "odds", "size"), lay)
             text(r["runner_id"], "runner_id"); text(r["name"], "name")
             if r["runner_id"] in ids:
                 raise Invalid("Duplicate numeric runner")
@@ -150,6 +152,10 @@ def validate(d, config):
             number(r["rated_price"] if kind == "model" else r["odds"], 1.00000001, 1e9, "decimal price")
             if kind == "quotes" and r["size"] is not None:
                 number(r["size"], 0, 1e12, "size")
+            if r.get("lay_odds") is not None:
+                number(r["lay_odds"], r["odds"], 1e9, "lay price")
+            if r.get("lay_size") is not None:
+                number(r["lay_size"], 0, 1e12, "lay size")
     elif kind == "evidence":
         keys(p, ("runner_ids", "author", "original_url", "claim_id", "excerpt", "summary", "type", "conditions", "reviewed"))
         url(p["original_url"])
