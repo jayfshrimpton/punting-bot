@@ -1,4 +1,4 @@
-"""PuntingPowerAI History v1. Prior-day features; race-level conditional logit."""
+"""PuntingPowerAI History v1.3. Prior-day features; race-level conditional logit."""
 import csv
 import copy
 import hashlib
@@ -17,9 +17,15 @@ from scipy.optimize import minimize
 
 from .core import Invalid, digest, namekey, now
 
-FEATURES = ["log_prior_starts", "smoothed_win_rate", "recent_market_strength", "last_market_strength", "recent_outperformance", "log_days_since_start", "distance_change_km", "no_history"]
+FEATURES = ["log_prior_starts", "decayed_win_rate", "recent_market_strength", "last_market_strength", "recent_outperformance", "log_days_since_start", "distance_change_km", "no_history", "recent_class", "last_class", "recent_nz_share"]
 AU = {"NSW", "VIC", "QLD", "SA", "WA", "TAS", "NT", "ACT"}
-SCHEMA = "history-v1.1"
+# New Zealand starts are horse form only: they update histories but are never training or evaluation targets.
+FORM_ONLY = {"NZ"}
+SCHEMA = "history-v1.3"
+# Fixed before fitting, not tuned: a win a year before the target race counts half.
+WIN_HALF_LIFE_DAYS = 365
+# Rating of a horse with no usable history; anchors the class scale.
+UNRATED = 0.0
 
 
 def archive_rows(root):
@@ -54,8 +60,8 @@ def load_races(root, through=date(2026,8,31)):
     grouped = defaultdict(list)
     exclusions = Counter()
     for r in archive_rows(root):
-        if r.get("STATE_CODE") not in AU or r.get("RACING_TYPE", "").lower() != "thoroughbred":
-            exclusions["non_AU_or_non_thoroughbred_rows"] += 1
+        if r.get("STATE_CODE") not in AU|FORM_ONLY or r.get("RACING_TYPE", "").lower() != "thoroughbred":
+            exclusions["unknown_jurisdiction_or_non_thoroughbred_rows"] += 1
             continue
         if not r.get("WIN_MARKET_ID"):
             exclusions["missing_market_rows"] += 1
@@ -101,21 +107,38 @@ def load_races(root, through=date(2026,8,31)):
         total = sum(1/r["bsp"] for r in rows)
         if not .8<=total<=1.2:
             exclusions["incomplete_or_inconsistent_BSP_field"] += 1; continue
-        races.append({"id":mid,"date":day.isoformat(),"track":rows[0]["TRACK"],"rows":rows,"market_p":[1/r["bsp"]/total for r in rows]})
+        races.append({"id":mid,"date":day.isoformat(),"track":rows[0]["TRACK"],"jurisdiction":"NZ" if rows[0]["STATE_CODE"] in FORM_ONLY else "AU","rows":rows,"market_p":[1/r["bsp"]/total for r in rows]})
     return sorted(races,key=lambda r:(r["date"],r["id"])),dict(exclusions)
+
+
+def rating(history):
+    """Class-adjusted ability: mean market-implied rating over the recent starts."""
+    return sum(r["rating"] for r in history["recent"])/len(history["recent"])
+
+
+def field_strength(ratings):
+    """Log-sum-exp of the runners' prior ratings, the conditional-logit normaliser.
+    A runner's market-implied rating is log(market p) plus this, so $8 against
+    proven Group horses rates higher than $8 in a weak maiden."""
+    top=max(ratings)
+    return top+math.log(sum(math.exp(r-top) for r in ratings))
 
 
 def features(history, day, distance):
     if not history:
-        return [0,.1,-math.log(10),-math.log(10),0,math.log1p(90),0,1]
+        return [0,.1,-math.log(10),-math.log(10),0,math.log1p(90),0,1,UNRATED,UNRATED,0]
     recent = history["recent"]
     days = (date.fromisoformat(day)-date.fromisoformat(recent[-1]["date"])).days
     if days<=0:
         raise Invalid("History must precede the target calendar day")
-    return [math.log1p(history["starts"]),(history["wins"]+1)/(history["starts"]+10),
+    # Decayed sums are stored as at the last start; fade them to the target day.
+    fade=.5**(days/WIN_HALF_LIFE_DAYS)
+    return [math.log1p(history["starts"]),(history["decayed_wins"]*fade+1)/(history["decayed_starts"]*fade+10),
             sum(-math.log(r["bsp"]) for r in recent)/len(recent),-math.log(recent[-1]["bsp"]),
             sum(r["won"]-r["market_p"] for r in recent)/len(recent),
-            math.log1p(min(days,730)),min(abs(distance-recent[-1]["distance"])/1000,5),0]
+            math.log1p(min(days,730)),min(abs(distance-recent[-1]["distance"])/1000,5),0,
+            sum(r["class"] for r in recent)/len(recent),recent[-1]["class"],
+            sum(r["nz"] for r in recent)/len(recent)]
 
 
 def build_features(races, initial_history=None):
@@ -126,10 +149,16 @@ def build_features(races, initial_history=None):
     out = []
     for day, daily in sorted(by_day.items()):
         daily_names=Counter(namekey(r["SELECTION_NAME"]) for race in daily for r in race["rows"])
+        strengths=[]
         for race in daily:
-            out.append({**race,"x":[features(history.get(namekey(r["SELECTION_NAME"])) if daily_names[namekey(r["SELECTION_NAME"])]==1 else None,day,r["distance"]) for r in race["rows"]]})
+            known=[history.get(namekey(r["SELECTION_NAME"])) if daily_names[namekey(r["SELECTION_NAME"])]==1 else None for r in race["rows"]]
+            strengths.append(field_strength([rating(h) if h else UNRATED for h in known]))
+            out.append({**race,"x":[features(h,day,r["distance"]) for h,r in zip(known,race["rows"])]})
         # Outcomes cannot affect their own features or another race on the same day.
-        for race in daily:
+        for race,strength in zip(daily,strengths):
+            # Log-mean-exp of prior ratings: the field's class, independent of field size.
+            level=strength-math.log(len(race["rows"]))
+            nz=int(race.get("jurisdiction")=="NZ")
             for r,mp in zip(race["rows"],race["market_p"]):
                 sid = namekey(r["SELECTION_NAME"])
                 if daily_names[sid]!=1:
@@ -137,12 +166,16 @@ def build_features(races, initial_history=None):
                     # merge either outcome into an existing horse's history.
                     history.pop(sid,None)
                     continue
-                h = history.setdefault(sid,{"starts":0,"wins":0,"names":[],"recent":[]})
-                h["starts"]+=1
-                won=int(r["WIN_RESULT"]=="WINNER");h["wins"]+=won
+                h = history.setdefault(sid,{"starts":0,"wins":0,"decayed_starts":0.,"decayed_wins":0.,"names":[],"recent":[]})
+                if h["recent"]:
+                    fade=.5**((date.fromisoformat(day)-date.fromisoformat(h["recent"][-1]["date"])).days/WIN_HALF_LIFE_DAYS)
+                    h["decayed_starts"]*=fade;h["decayed_wins"]*=fade
+                won=int(r["WIN_RESULT"]=="WINNER")
+                h["starts"]+=1;h["wins"]+=won;h["decayed_starts"]+=1;h["decayed_wins"]+=won
                 if r["SELECTION_NAME"] not in h["names"]:
                     h["names"].append(r["SELECTION_NAME"])
-                h["recent"]=(h["recent"]+[{"date":day,"bsp":r["bsp"],"distance":r["distance"],"won":won,"market_p":mp}])[-5:]
+                h["recent"]=(h["recent"]+[{"date":day,"bsp":r["bsp"],"distance":r["distance"],"won":won,"market_p":mp,
+                                           "class":level,"rating":math.log(mp)+strength,"nz":nz}])[-5:]
     return out,history
 
 
@@ -230,15 +263,17 @@ def train(root="data/history",output="data/model"):
     races,excluded=load_races(root)
     print(f"Validated {len(races):,} races; excluded {json.dumps(excluded,sort_keys=True)}; building strictly lagged features",flush=True)
     races,history=build_features(races)
-    training=[r for r in races if "2025-01-01"<=r["date"]<"2026-06-01"]
-    validation=[r for r in races if "2026-06-01"<=r["date"]<"2026-07-01"]
-    diagnostic=[r for r in races if "2026-07-01"<=r["date"]<"2026-09-01"]
+    # New Zealand races have already updated horse histories; only Australian races are targets.
+    targets=[r for r in races if r["jurisdiction"]=="AU"]
+    training=[r for r in targets if "2025-01-01"<=r["date"]<"2026-06-01"]
+    validation=[r for r in targets if "2026-06-01"<=r["date"]<"2026-07-01"]
+    diagnostic=[r for r in targets if "2026-07-01"<=r["date"]<"2026-09-01"]
     if len(training)<500 or len(validation)<100 or len(diagnostic)<100:
         raise Invalid("Insufficient chronological data for the frozen protocol")
     model=fit(training)
     print(f"Fit converged in {model['iterations']} iterations; evaluating chronological splits",flush=True)
-    model.update({"schema":SCHEMA,"name":"PuntingPowerAI History v1.2","created_at":now(),"trained_through":"2026-05-31","history_through":max(r["date"] for r in races),"sources":json.loads((root/"manifest.json").read_text()),"protocol_sha256":hashlib.sha256(Path("MODEL_PROTOCOL.md").read_bytes()).hexdigest(),"live_approved":False})
-    metrics={"training_races":len(training),"excluded":excluded,"validation":evaluate(model,validation),"diagnostic_not_holdout":evaluate(model,diagnostic)}
+    model.update({"schema":SCHEMA,"name":"PuntingPowerAI History v1.3","created_at":now(),"trained_through":"2026-05-31","history_through":max(r["date"] for r in races),"sources":json.loads((root/"manifest.json").read_text()),"protocol_sha256":hashlib.sha256(Path("MODEL_PROTOCOL.md").read_bytes()).hexdigest(),"live_approved":False})
+    metrics={"training_races":len(training),"form_only_races":len(races)-len(targets),"excluded":excluded,"validation":evaluate(model,validation),"diagnostic_not_holdout":evaluate(model,diagnostic)}
     artifact={"model":model,"metrics":metrics,"history":history}
     sid=digest(artifact)
     path=output/(sid+".json")
@@ -252,7 +287,7 @@ def train(root="data/history",output="data/model"):
 
 
 def render_model(model,metrics,sid):
-    lines=[f"# {model['name']} — first statistical model", "", "Research baseline. Not approved for live decisions. No demonstrated betting edge.","",f"Trained through {model['trained_through']}; history through {model['history_through']}. Missing September history blocks current weekend predictions.","",f"Training races: {metrics['training_races']:,}. Artifact: {sid}","", "## Chronological evaluation", "", "July–August is a diagnostic, not an untouched holdout. Lower log loss and Brier score are better. BSP uses final prices and is a hindsight benchmark, unavailable for an earlier prediction.","", "| Period | Races | Model log loss | Uniform log loss | BSP hindsight log loss | Model Brier | Model top win rate |", "|---|---:|---:|---:|---:|---:|---:|"]
+    lines=[f"# {model['name']} — history-based statistical model", "", "Research baseline. Not approved for live decisions. No demonstrated betting edge.","",f"Trained through {model['trained_through']}; history through {model['history_through']}.","",f"Training races: {metrics['training_races']:,} Australian. New Zealand races used only as horse form: {metrics.get('form_only_races',0):,}. Artifact: {sid}","", "## Chronological evaluation", "", "July–August is a diagnostic, not an untouched holdout. Lower log loss and Brier score are better. BSP uses final prices and is a hindsight benchmark, unavailable for an earlier prediction.","", "| Period | Races | Model log loss | Uniform log loss | BSP hindsight log loss | Model Brier | Model top win rate |", "|---|---:|---:|---:|---:|---:|---:|"]
     for key in ("validation","diagnostic_not_holdout"):
         m=metrics[key]
         lines.append(f"| {m['from']} to {m['through']} | {m['races']} | {m['model_log_loss']:.4f} | {m['uniform_log_loss']:.4f} | {m['BSP_hindsight_log_loss']:.4f} | {m['model_race_brier']:.4f} | {m['model_top_win_rate']:.1%} |")
@@ -266,8 +301,8 @@ def render_model(model,metrics,sid):
     for b in d["calibration"]:
         if b["runners"]:lines.append(f"| {b['range']} | {b['runners']} | {b['mean_p']:.3f} | {b['win_rate']:.3f} |")
     lines += ["", "## Fitted feature weights", "", "Standardised coefficients are associations, not causal effects.","", "| Feature | Weight |", "|---|---:|"]
-    lines += [f"| {name} | {w:.5f} |" for name,w in zip(FEATURES,model["weights"])]
-    lines += ["", "## Limitations", "", "Previous-race market prices supply a proxy for ability. This omits sectional, jockey, trainer, going and class features used in richer form models. Historical exports have no original publication audit; lagging by a whole day is an explicit availability assumption. Race completeness is checked through settlement and BSP consistency, but these checks are not equivalent to an independently archived official field.","", "Cross-race history uses exact normalised archive names, which carry no country suffix or punctuation. Betfair selection IDs proved unstable across starts in this archive. Same-day duplicate names are not merged. Official names are matched exactly first, then without suffix and punctuation; those matches are flagged for identity checks. Name reuse, spelling changes and local/imported horses sharing a name remain identity limitations; there is no authoritative cross-provider horse ID mapping yet.","", "No current-race BSP or result enters a feature. Scaling and coefficients are fitted only on training races. Outcomes update history only after every race on that date has been featurised. This is our fitted model, not a copy of Betfair's proprietary model.","", "Exclusions: "+json.dumps(metrics["excluded"],sort_keys=True),""]
+    lines += [f"| {name} | {w:.5f} |" for name,w in zip(model["features"],model["weights"])]
+    lines += ["", "## Limitations", "", "Previous-race market prices supply a proxy for ability. Class is inferred from collateral form: each past field's strength comes from its runners' earlier market-implied ratings, not from race titles or prize money. New Zealand starts count as form but carry thinner Betfair markets; the model learns a weight on each horse's New Zealand share. This omits sectional, jockey, trainer, weight, barrier and going features used in richer form models. Historical exports have no original publication audit; lagging by a whole day is an explicit availability assumption. Race completeness is checked through settlement and BSP consistency, but these checks are not equivalent to an independently archived official field.","", "Cross-race history uses exact normalised archive names, which carry no country suffix or punctuation. Betfair selection IDs proved unstable across starts in this archive. Same-day duplicate names are not merged. Official names are matched exactly first, then without suffix and punctuation; those matches are flagged for identity checks. Name reuse, spelling changes and horses sharing a name (now also across Australia and New Zealand) remain identity limitations; there is no authoritative cross-provider horse ID mapping yet.","", "No current-race BSP or result enters a feature. Scaling and coefficients are fitted only on training races. Outcomes update history only after every race on that date has been featurised. This is our fitted model, not a copy of Betfair's proprietary model.","", "Exclusions: "+json.dumps(metrics["excluded"],sort_keys=True),""]
     return "\n".join(lines)
 
 

@@ -1,4 +1,5 @@
 import copy
+import math
 import hashlib
 import json
 import tempfile
@@ -57,6 +58,40 @@ class ModelTests(unittest.TestCase):
                          ["CROSS TASMAN","SURFIN BIRD","ALABAMA STATE",None,None])
         # The archive drops suffixes, so a local and an imported horse sharing a name cannot be told apart.
         self.assertEqual(match_history(["ZAMBARDO","ZAMBARDO (NZ)"],history,index),[None,None])
+
+    def test_same_price_against_stronger_opposition_rates_higher_class(self):
+        def named(day,mid,names,prices):
+            total=sum(1/p for p in prices)
+            return {"id":mid,"date":day,"track":"Synthetic","rows":[{"SELECTION_ID":n,"SELECTION_NAME":n,"distance":1200,"bsp":p,"WIN_RESULT":"WINNER" if i==0 else "LOSER"} for i,(n,p) in enumerate(zip(names,prices))],"market_p":[1/p/total for p in prices]}
+        # ACE was a clear favourite and DUD an outsider; HERO and ZERO then ran at even money against them.
+        data,_=build_features([named("2025-01-01","r1",["ACE","DUD"],[1.25,5]),
+                               named("2025-01-02","r2",["HERO","ACE"],[2,2]),named("2025-01-02","r3",["ZERO","DUD"],[2,2]),
+                               named("2025-01-03","r4",["HERO","ZERO"],[2,2])])
+        hero,zero=data[-1]["x"]
+        self.assertEqual(hero[2:4],zero[2:4])
+        self.assertGreater(hero[8],zero[8])
+        self.assertAlmostEqual(hero[9]-zero[9],math.log(2.6/1.4))
+
+    def test_older_wins_count_less(self):
+        _,h=build_features([race("2025-01-01","one")])
+        soon=features(h["A"],"2025-01-08",1200)[1];later=features(h["A"],"2027-01-01",1200)[1]
+        self.assertGreater(soon,later);self.assertGreater(later,.1)
+        self.assertAlmostEqual(later,(.25+1)/(.25+10),places=3)
+
+    def test_new_zealand_form_counts_but_other_jurisdictions_are_excluded(self):
+        header="LOCAL_MEETING_DATE,TRACK,STATE_CODE,RACE_NO,WIN_MARKET_ID,RACING_TYPE,DISTANCE,SELECTION_ID,SELECTION_NAME,WIN_RESULT,WIN_BSP\n"
+        rows="".join(f"{day},Synthetic,{state},1,{mid},Thoroughbred,1200,{sid},{sid},{result},2\n" for day,state,mid in [("2025-01-01","NZ","m1"),("2025-01-02","HK","m2"),("2025-01-03","NSW","m3")] for sid,result in [("A","WINNER"),("B","LOSER")])
+        with tempfile.TemporaryDirectory() as root:
+            data=(header+rows).encode()
+            Path(root,"sample.csv").write_bytes(data)
+            Path(root,"manifest.json").write_text(json.dumps([{"name":"sample.csv","sha256":hashlib.sha256(data).hexdigest()}]))
+            races,excluded=load_races(root)
+        self.assertEqual([r["jurisdiction"] for r in races],["NZ","AU"])
+        self.assertEqual(excluded,{"unknown_jurisdiction_or_non_thoroughbred_rows":2})
+        data,h=build_features(races)
+        self.assertEqual(h["A"]["starts"],2)
+        # The Australian race sees the New Zealand start as form.
+        self.assertEqual(data[1]["x"][0][10],1)
 
     def test_day_first_archive_dates_are_loaded_and_bad_dates_counted(self):
         header="LOCAL_MEETING_DATE,TRACK,STATE_CODE,RACE_NO,WIN_MARKET_ID,RACING_TYPE,DISTANCE,SELECTION_ID,SELECTION_NAME,WIN_RESULT,WIN_BSP\n"

@@ -29,14 +29,19 @@ class RecentHistoryTests(unittest.TestCase):
         self.assertIsNone(self.convert(r)[0])
         r=self.row();r['event_dt']='01-09-2026 04:00'
         with self.assertRaises(Invalid):self.convert(r)
+        # A track known only from New Zealand form cannot carry an (AUS) label.
+        self.assertIsNone(normalise(self.row(),{'rosehill':{'NZ'}},date(2026,8,31),date(2026,9,22))[0])
 
     def test_history_refresh_does_not_mutate_parent_and_keeps_same_day_lag(self):
-        original={'ALPHA':{'starts':1,'wins':0,'names':['Alpha'],'recent':[{'date':'2026-08-30','distance':1200,'bsp':4.,'won':0,'market_p':.25}]}}
+        original={'ALPHA':{'starts':1,'wins':0,'decayed_starts':1.,'decayed_wins':0.,'names':['Alpha'],'recent':[{'date':'2026-08-30','distance':1200,'bsp':4.,'won':0,'market_p':.25,'class':.3,'rating':.1,'nz':0}]}}
         before=copy.deepcopy(original)
         races=[{'id':'x','date':'2026-09-01','rows':[{'SELECTION_NAME':'Alpha','WIN_RESULT':'WINNER','bsp':2.,'distance':1200}], 'market_p':[1.]}]
         processed,updated=build_features(races,original)
         self.assertEqual(original,before)
         self.assertEqual(updated['ALPHA']['starts'],2)
+        # The refreshed start extends the class-adjusted history rather than restarting it.
+        self.assertEqual(len(updated['ALPHA']['recent']),2)
+        self.assertEqual(processed[0]['x'][0][8],.3)
         self.assertAlmostEqual(processed[0]['x'][0][3],-__import__('math').log(4.))
 
 if __name__=='__main__':unittest.main()

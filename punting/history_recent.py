@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 from urllib.request import urlopen
 from .core import Invalid, digest, now
-from .model import archive_rows, build_features, load_races
+from .model import AU, archive_rows, build_features, load_races
 
 LISTING='https://promo.betfair.com/betfairsp/prices/index.php'
 FIELDS=['LOCAL_MEETING_DATE','TRACK','STATE_CODE','RACE_NO','WIN_MARKET_ID','RACING_TYPE','DISTANCE','SELECTION_ID','SELECTION_NAME','WIN_RESULT','WIN_BSP']
@@ -65,7 +65,8 @@ def normalise(row, track_states, after, through):
     off=datetime.strptime(row['event_dt'],'%d-%m-%Y %H:%M').date()
     if abs((day-off).days)>1:raise Invalid('Daily file date disagrees with meeting label')
     states=track_states.get(menu[1].casefold(),set())
-    if len(states)!=1:return None,'unmapped_or_ambiguous_track'
+    # The archive now includes New Zealand form; an (AUS) label must map to an Australian state.
+    if len(states)!=1 or not states<=AU:return None,'unmapped_or_ambiguous_track'
     if row['win_lose'] not in {'0','1'}:raise Invalid('Unsupported daily settlement')
     name=re.sub(r'^\d+\.\s*','',row['selection_name']).strip()
     if not name:raise Invalid('Empty horse name')
