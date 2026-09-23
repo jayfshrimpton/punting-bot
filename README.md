@@ -49,6 +49,23 @@ For v1.3 the model's blend weight is about zero against both BSP and the best ba
 
 July–August has already been inspected and is labelled a diagnostic, never an untouched holdout. Training ends May 2026; June is development validation. See the protocol for features, split bounds, fixed regularisation and settlement assumptions.
 
+## Betfair prices
+
+Read-only exchange prices from the official Betfair API. Nothing here places bets. Copy `.env.example` to `.env` and add your Delayed application key; Git ignores `.env`. Then log in yourself:
+
+```powershell
+.\.venv\Scripts\python.exe -m punting.betfair login
+```
+
+It asks for your password (hidden), sends it once to Betfair's Australian login endpoint and saves only the session token, in `data/private/`. Use `login --ssoid` to paste a session token from your browser instead. No command prints the token.
+
+```powershell
+.\.venv\Scripts\python.exe -m punting.betfair check
+.\.venv\Scripts\python.exe -m punting.betfair snapshot
+```
+
+`check` matches each official race to its Betfair WIN market without storing anything. A market must agree on race number and start time, and each runner on saddlecloth number and name. `snapshot` stores the best back price and size for each matched runner as a `quotes` snapshot, with the market base rate as commission (your personal discount isn't applied). The Delayed key lags by 1–180 seconds. Races with unresolved emergencies aren't stored until the official field is refreshed, and in-play or suspended markets are skipped.
+
 ## Refresh the race cards
 
 ```powershell
