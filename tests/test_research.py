@@ -5,11 +5,12 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from punting.core import Invalid, break_even, expected_return, field_signature, local, stamp
 from punting.store import Store
 from punting.report import assess, build, render_evidence, to_html
-from punting.sources import parse_fields
+from punting.sources import fetch_fields, parse_fields
 
 CONFIG=json.loads(Path("config.json").read_text())
 MID="rosehill-2026-09-26"
@@ -147,6 +148,19 @@ class ResearchTests(unittest.TestCase):
     def test_parser_rejects_partial_official_card(self):
         raw='Rosehill Gardens Saturday, 26 September 2026 Total Number of acceptors for this meeting (including emergencies) 3 <span>Race 1 - 12:00PM Test (1200 METRES)</span><table class="race-strip-fields"><tr><td class="no">1</td><td class="horse"><a href="../HorseFullForm.aspx?horsecode=abc">Alpha</a></td></tr></table>'
         with self.assertRaises(Invalid):parse_fields(raw,CONFIG["meetings"][0],OBS,"https://example.com/")
+
+    def test_race_day_refresh_keeps_races_not_yet_started(self):
+        config=copy.deepcopy(CONFIG);meeting=config["meetings"][0];meeting["date"]="2026-09-22"
+        row=lambda n,code,name:f'<tr><td class="no">{n}</td><td class="horse"><a href="../HorseFullForm.aspx?horsecode={code}">{name}</a></td></tr>'
+        raw=('Rosehill Gardens Tuesday, 22 September 2026 Total Number of acceptors for this meeting (including emergencies) 4 '
+             '<span>Race 1 - 12:00PM Early (1200 METRES)</span><table class="race-strip-fields">'+row(1,"a","ALPHA")+row(2,"b","BETA")+'</table>'
+             '<span>Race 2 - 4:00PM Late (1400 METRES)</span><table class="race-strip-fields">'+row(1,"c","GAMMA")+row(2,"d","DELTA")+'</table>')
+        response=mock.MagicMock();response.__enter__.return_value.read.return_value=raw.encode()
+        # 1:30pm Sydney: race 1 has started, race 2 has not.
+        with mock.patch("punting.sources.urlopen",return_value=response),mock.patch("punting.sources.now",return_value="2026-09-22T03:30:00+00:00"):
+            ids,detail,ok=fetch_fields(meeting,self.store,config)
+        self.assertTrue(ok);self.assertIn("already started: R1",detail)
+        self.assertEqual([d["payload"]["race_name"] for d in self.store.all(MID) if d["id"] in ids],["Late (1400 METRES)"])
 
 
 if __name__=="__main__":unittest.main()

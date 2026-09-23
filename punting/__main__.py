@@ -35,7 +35,7 @@ def main():
             failures=0
             for m in config["meetings"]:
                 if args.meeting and args.meeting!=m["id"]:continue
-                ids,detail=fetch_fields(m,store,config);print(m["id"]+": "+detail);failures+=not bool(ids)
+                ids,detail,ok=fetch_fields(m,store,config);print(m["id"]+": "+detail);failures+=not ok
             if failures:raise Invalid(f"{failures} field fetch(es) failed; attempts logged")
         elif args.command=="import":
             raw=Path(args.path).read_text(encoding="utf-8-sig")

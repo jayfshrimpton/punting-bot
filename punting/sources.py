@@ -8,7 +8,7 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
-from .core import Invalid, now
+from .core import Invalid, now, stamp
 
 
 class Text(HTMLParser):
@@ -96,16 +96,21 @@ def fetch_fields(meeting, store, config):
                 raise Invalid("Official page exceeds size limit")
         observed = now()
         documents = parse_fields(raw.decode("utf-8-sig"), meeting, observed, address)
-        # Validate the entire card before inserting any race.
+        # The whole card was reconciled above. A race already under way cannot take a
+        # pre-race snapshot, so store the rest of the card rather than refusing all of it.
+        started = [d["race_no"] for d in documents if stamp(observed) >= stamp(d["payload"]["start_at"])]
+        pending = [d for d in documents if d["race_no"] not in started]
+        # Validate every pending race before inserting any.
         from .core import validate
-        for d in documents:
+        for d in pending:
             validate(d,config)
-        ids = [store.add(d,config) for d in documents]
-        detail = f"Verified complete official card: {len(documents)} races, {sum(len(d['payload']['runners']) for d in documents)} acceptors. Response SHA256 {hashlib.sha256(raw).hexdigest()}."
-        status = "checked with relevant evidence"
+        ids = [store.add(d,config) for d in pending]
+        skipped = f"Not stored, already started: {', '.join(f'R{n}' for n in started)}. " if started else ""
+        detail = f"Verified complete official card: {len(documents)} races, {sum(len(d['payload']['runners']) for d in documents)} acceptors. {skipped}Response SHA256 {hashlib.sha256(raw).hexdigest()}."
+        status = "checked with relevant evidence" if pending else "checked with nothing relevant"
     except Exception as exc:
         ids = []
         status, detail = "failed", f"{type(exc).__name__}: {exc}. Failure does not establish that fields are unpublished."
     store.add({"kind":"coverage", "meeting_id":meeting["id"], "source_url":address, "publisher":"Racing Australia", "observed_at":observed,
                "published_at":None, "payload":{"source":"Official fields", "status":status, "detail":detail, "checked_urls":[address]}},config)
-    return ids, detail
+    return ids, detail, status != "failed"

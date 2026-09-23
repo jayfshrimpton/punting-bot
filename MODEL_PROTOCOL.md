@@ -1,4 +1,4 @@
-# Model protocol v1.1 — fixed specification, corrected identity handling
+# Model protocol v1.2 — fixed specification, corrected identity handling and archive dates
 
 User clarification, 23 September 2026: build our own statistical model from Betfair historical data, informed by their published approach. Fresh Hub ratings are optional comparisons, not the model or a dependency. This supersedes the external-baseline/no-new-training instructions in the original project plan.
 
@@ -22,9 +22,11 @@ No tuning against the July–August diagnostic. Fixed L2 penalty 0.01, maximum 3
 
 ## Features available before the target race
 
-For each runner, use only starts from earlier calendar dates. Same-day results never update another race's inputs. Horse identity uses exact normalised names within the Australian thoroughbred archive, retaining country suffixes. Same-day duplicates are not merged. Upcoming Racing Australia names require an exact match. Ambiguous/unseen names use a cold-start prior and are flagged. This is an explicit identity assumption; authoritative cross-provider horse IDs, name reuse and omitted country suffixes remain unresolved.
+For each runner, use only starts from earlier calendar dates. Same-day results never update another race's inputs. Horse identity uses exact normalised names within the Australian thoroughbred archive. The archive's names carry no country suffix, punctuation or accents. Same-day duplicates are not merged. An upcoming Racing Australia name first needs an exact match, then a unique match with its suffix, punctuation and accents removed; those matches are listed for identity checks. Unseen names, names matching several archive names, and different runners in one meeting resolving to one archive name use a flagged cold-start prior. This is an explicit identity assumption. Because the archive omits suffixes, a local and an imported horse sharing a name share one archive history; this, name reuse and the lack of authoritative cross-provider horse IDs remain unresolved.
 
 Correctness amendment after the initial run: selection IDs in this export change across starts (verified using Alabama State and My Gladiola). v1 incorrectly treated them as persistent horse IDs, yielding mostly cold starts. Its model, metrics and projections are superseded. v1.1 fixes the join and adds regression tests without changing features, splits, penalty or selection policy. All previously inspected periods remain diagnostic.
+
+Second correctness amendment, 23 September 2026 (v1.2). The April 2025 archive file writes dates as D/MM/YYYY. v1.1 silently excluded all 1,455 of its races under an invalid-price label, which removed a month of training races and left a gap in every horse's history. v1.2 parses both date formats and counts date failures separately. Separately, v1.1 required exact official-name matches, so every imported horse and every name with an apostrophe became a cold start (51 of 226 active weekend runners). Features, splits, penalty and selection policy are unchanged. v1.1 metrics and projections are superseded; retrain before projecting.
 
 Features: log prior start count; smoothed prior win rate; mean negative log BSP over previous five starts; last-start negative log BSP; mean win-minus-normalised-BSP expectation over previous five starts; log days since last start; distance difference from last start; missing-history indicator. Historical BSP is used **only from previous races** as a market-informed performance proxy. Current-race BSP, results, preplay aggregate prices/volume, archive model ratings, and post-race speed fields never enter features. No jockey/trainer/sectional claims: those point-in-time inputs are absent from these files.
 
