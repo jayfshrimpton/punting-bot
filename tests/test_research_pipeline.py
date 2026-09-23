@@ -1,10 +1,14 @@
 import copy
 import json
+import io
+from email.message import Message
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError, URLError
+from urllib.request import BaseHandler, ProxyHandler, build_opener
+from urllib.response import addinfourl
 
 from punting.core import Invalid
 from punting.store import Store
@@ -156,6 +160,88 @@ class FetchTests(unittest.TestCase):
             cache_text("Original page text " * 5, self.cache)
 
 
+class RedirectTests(unittest.TestCase):
+    """Use urllib's real redirect machinery with a fake transport; no network requests."""
+    def setUp(self):
+        access._robots.clear(); access._last.clear()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(access._robots.clear)
+        self.addCleanup(access._last.clear)
+        self.calls = []
+        self.routes = {"http://www.racing.com/robots.txt": (200, {}, "User-agent: *\nDisallow: /restricted\n")}
+        calls, routes = self.calls, self.routes
+
+        class Transport(BaseHandler):
+            handler_order = 100
+
+            def http_open(self, request):
+                calls.append(request.full_url)
+                if request.full_url not in routes:
+                    raise AssertionError("Forbidden or unexpected request: " + request.full_url)
+                code, fields, body = routes[request.full_url]
+                headers = Message()
+                headers["Content-Type"] = "text/html"
+                for k, v in fields.items():
+                    headers[k] = v
+                response = addinfourl(io.BytesIO(body.encode()), headers, request.full_url, code)
+                response.msg = "OK" if code == 200 else "Redirect"
+                return response
+
+        patched = mock.patch.object(access, "build_opener", side_effect=lambda *handlers: build_opener(ProxyHandler({}), Transport(), *handlers))
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def fetch(self, path="/go"):
+        return fetch("http://www.racing.com" + path, self.temp.name, pause=lambda _: None)
+
+    def test_cross_host_redirect_never_contacts_destination(self):
+        self.routes["http://www.racing.com/go"] = (302, {"Location": "http://www.punters.com.au/restricted"}, "")
+        with self.assertRaisesRegex(Invalid, "cross-host"):
+            self.fetch()
+        self.assertEqual(self.calls, ["http://www.racing.com/robots.txt", "http://www.racing.com/go"])
+
+    def test_same_host_redirect_checks_robots_before_request(self):
+        self.routes["http://www.racing.com/go"] = (302, {"Location": "/restricted/article"}, "")
+        with self.assertRaisesRegex(Invalid, "robots.txt disallows"):
+            self.fetch()
+        self.assertEqual(self.calls, ["http://www.racing.com/robots.txt", "http://www.racing.com/go"])
+
+    def test_allowed_relative_redirects_are_followed_and_rate_limited(self):
+        self.routes.update({
+            "http://www.racing.com/go": (301, {"Location": "/news/old"}, ""),
+            "http://www.racing.com/news/old": (307, {"Location": "new"}, ""),
+            "http://www.racing.com/news/new": (200, {}, "<p>St Gotthard looks ready.</p>"),
+        })
+        pause = mock.Mock()
+        with mock.patch.object(access.time, "monotonic", return_value=100):
+            record = fetch("http://www.racing.com/go", self.temp.name, pause=pause)
+        self.assertEqual(self.calls, list(self.routes))
+        self.assertEqual(pause.call_args_list, [mock.call(3.0)] * 3)
+        self.assertIn("St Gotthard", access.cached(record["text_sha256"], self.temp.name))
+
+    def test_redirected_robots_fail_closed_before_following(self):
+        for destination in ("/other-robots.txt", "http://www.punters.com.au/robots.txt"):
+            with self.subTest(destination=destination):
+                access._robots.clear(); self.calls.clear()
+                self.routes["http://www.racing.com/robots.txt"] = (302, {"Location": destination}, "")
+                with self.assertRaisesRegex(Invalid, "robots.txt disallows"):
+                    self.fetch()
+                self.assertEqual(self.calls, ["http://www.racing.com/robots.txt"])
+
+    def test_redirect_loops_are_bounded(self):
+        self.routes["http://www.racing.com/go"] = (302, {"Location": "/go"}, "")
+        with self.assertRaisesRegex(Invalid, "Too many page redirects"):
+            self.fetch()
+        self.assertEqual(len(self.calls), 1 + access.MAX_REDIRECTS + 1)
+
+    def test_non_http_redirect_never_contacts_destination(self):
+        self.routes["http://www.racing.com/go"] = (302, {"Location": "ftp://www.racing.com/private"}, "")
+        with self.assertRaisesRegex(Invalid, "ordinary HTTP"):
+            self.fetch()
+        self.assertEqual(len(self.calls), 2)
+
+
 class NameAndVerificationTests(unittest.TestCase):
     RUNNERS = field()["payload"]["runners"]
 
@@ -269,6 +355,46 @@ class PackTests(PackBase):
             with self.assertRaisesRegex(Invalid, "after the race start"):
                 import_pack(self.write(p), self.store, self.notes, CONFIG, self.cache)
         self.assertFalse([d for d in self.store.all(MID) if d["kind"] == "evidence"])
+
+    def test_future_note_rejects_check_and_import_without_partial_records(self):
+        p = self.pack()
+        p["notes"][0]["observed_at"] = "2099-01-01T00:00:00+00:00"
+        before = self.store.all(MID)
+        for operation in (lambda: build(p, self.store, CONFIG, self.cache),
+                          lambda: import_pack(self.write(p), self.store, self.notes, CONFIG, self.cache)):
+            with self.assertRaisesRegex(Invalid, "Note observation cannot be in the future"):
+                operation()
+            self.assertEqual(self.store.all(MID), before)
+            self.assertEqual(self.notes.all(MID), [])
+            self.assertEqual(len(list((self.root / "data" / "snapshots").glob("*.json"))), len(before))
+
+    def test_invalid_note_race_rejects_whole_pack(self):
+        for race in ("1", -1, True, [1]):
+            p = self.pack(); p["notes"][0]["race_no"] = race
+            with self.subTest(race=race), self.assertRaisesRegex(Invalid, "Note race_no"):
+                import_pack(self.write(p), self.store, self.notes, CONFIG, self.cache)
+        self.assertEqual(len(self.store.all(MID)), 1)
+        self.assertEqual(self.notes.all(MID), [])
+
+    def test_check_rejects_post_start_evidence_like_import(self):
+        p = self.pack(); p["notes"] = []
+        p["pages"][0]["observed_at"] = "2026-09-26T02:30:00+00:00"
+        with mock.patch("punting.core.now", return_value="2026-09-26T03:00:00+00:00"), mock.patch("punting.research.evidence.now", return_value="2026-09-26T03:00:00+00:00"):
+            for operation in (lambda: build(p, self.store, CONFIG, self.cache),
+                              lambda: import_pack(self.write(p), self.store, self.notes, CONFIG, self.cache)):
+                with self.assertRaisesRegex(Invalid, "after the race start"):
+                    operation()
+        self.assertEqual(len(self.store.all(MID)), 1)
+        self.assertEqual(self.notes.all(MID), [])
+
+    def test_check_applies_coverage_validation(self):
+        p = self.pack(); p["coverage"][0]["checked_urls"] = ["file:///private"]
+        for operation in (lambda: build(p, self.store, CONFIG, self.cache),
+                          lambda: import_pack(self.write(p), self.store, self.notes, CONFIG, self.cache)):
+            with self.assertRaisesRegex(Invalid, "ordinary HTTP"):
+                operation()
+        self.assertEqual(len(self.store.all(MID)), 1)
+        self.assertEqual(self.notes.all(MID), [])
 
     def test_manual_import_is_marked_unverified(self):
         p = self.pack()

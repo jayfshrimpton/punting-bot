@@ -302,7 +302,31 @@ def build(pack, store, config, cache="data/private/pages"):
             basis.append({"url": source.get("url") or source["source_url"], "publisher": source["publisher"], "observed_at": source["observed_at"]})
         notes.append({"kind": "note", "meeting_id": meeting, "race_no": n["race_no"], "classifier": pack["researcher"], "text": n["text"],
                       "basis": basis, "observed_at": n["observed_at"]})
+    from ..core import validate
+    for d in evidence + coverage:
+        validate(d, config)
+    for d in evidence:
+        if d.get("race_no") is not None:
+            field = latest_field(store, d["meeting_id"], d["race_no"], d["observed_at"])
+            if stamp(d["observed_at"]) >= stamp(field["payload"]["start_at"]):
+                raise Invalid("Evidence observed after the race start cannot be imported")
+    for d in labels + notes:
+        validate_note(d)
     return evidence, labels, coverage, notes
+
+
+def validate_note(d):
+    """Shared preflight for generated notes and the append-only notes boundary."""
+    if d["kind"] not in {"classification", "note"}:
+        raise Invalid("Unknown research note kind")
+    text(d["meeting_id"], "meeting_id")
+    text(d["classifier"], "classifier")
+    race = d.get("race_no")
+    if race is not None and (type(race) is not int or race < 1):
+        raise Invalid("Note race_no must be a positive integer or null")
+    if stamp(d["observed_at"]) > stamp(now()):
+        raise Invalid("Note observation cannot be in the future")
+    canonical(d)
 
 
 class Notes:
@@ -319,11 +343,8 @@ class Notes:
         self.db.close()
 
     def add(self, d):
-        if d["kind"] not in {"classification", "note"}:
-            raise Invalid("Unknown research note kind")
+        validate_note(d)
         observed = stamp(d["observed_at"])
-        if observed > stamp(now()):
-            raise Invalid("Note observation cannot be in the future")
         sid = digest(d)
         with self.db:
             self.db.execute("INSERT OR IGNORE INTO notes VALUES(?,?,?,?,?,?,?,?)",
@@ -346,14 +367,6 @@ def import_pack(path, store, notes, config, cache="data/private/pages"):
     """Validate the whole pack against the store first, then write. Re-importing is idempotent."""
     pack = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     evidence, labels, coverage, extra = build(pack, store, config, cache)
-    from ..core import validate
-    for d in evidence + coverage:
-        validate(d, config)
-    for d in evidence:
-        if d.get("race_no") is not None:
-            field = latest_field(store, d["meeting_id"], d["race_no"], d["observed_at"])
-            if stamp(d["observed_at"]) >= stamp(field["payload"]["start_at"]):
-                raise Invalid("Evidence observed after the race start cannot be imported")
     ids = [store.add(d, config) for d in evidence]
     for sid, label in zip(ids, labels):
         if label["evidence_id"] != sid:

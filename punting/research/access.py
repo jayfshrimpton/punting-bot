@@ -15,14 +15,15 @@ import unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from ..core import Invalid, now, stamp, url
 
 AGENT = "PuntingPowerAI"
 UA = AGENT + "/0.1 local research (personal, non-commercial)"
 MAX_BYTES = 5_000_000
 MIN_INTERVAL = 3.0  # seconds between requests to one host, raised by any Crawl-delay
+MAX_REDIRECTS = 5
 
 # "hosts" own the fetch route. "also_on" lists hosts that carry this source's material (attribution only).
 POLICY = {
@@ -114,10 +115,33 @@ def robots_allows(policy, path):
     return best is None or best[1]
 
 
-def robots_for(origin, opener=urlopen):
-    """RFC 9309 status handling: 4xx means no restrictions; 5xx or unreachable means disallow everything."""
+class NoRedirect(HTTPRedirectHandler):
+    """Expose redirects as HTTPError so no destination is contacted before validation."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def open_once(request, timeout):
+    return build_opener(NoRedirect()).open(request, timeout=timeout)
+
+
+def throttle(origin, pause, delay=0):
+    wait = max(MIN_INTERVAL, delay or 0) - (time.monotonic() - _last.get(origin, -1e9))
+    if wait > 0:
+        pause(wait)
+    _last[origin] = time.monotonic()
+
+
+def robots_for(origin, opener=None, pause=time.sleep):
+    """4xx means no restrictions; errors and redirected robots files fail closed.
+
+    Robots redirects are refused because target-path permission is not yet known.
+    Injected openers must also disable automatic redirects.
+    """
     if origin in _robots:
         return _robots[origin]
+    opener = opener or open_once
+    throttle(origin, pause)
     try:
         with opener(Request(origin + "/robots.txt", headers={"User-Agent": UA}), timeout=20) as r:
             policy = dict(robots_rules(r.read(500_000).decode("utf-8", "replace")), status=r.status)
@@ -233,7 +257,7 @@ def cached(sha, cache):
     return content.decode("utf-8")
 
 
-def fetch(address, cache="data/private/pages", opener=urlopen, pause=time.sleep):
+def fetch(address, cache="data/private/pages", opener=None, pause=time.sleep):
     """Fetch one page if policy and robots.txt allow it. Returns a page record for an evidence pack."""
     raw, status, source = get(address, opener, pause)
     observed = now()
@@ -243,7 +267,7 @@ def fetch(address, cache="data/private/pages", opener=urlopen, pause=time.sleep)
             "http_status": status, "raw_sha256": hashlib.sha256(raw).hexdigest()}
 
 
-def links(address, pattern=".", opener=urlopen, pause=time.sleep):
+def links(address, pattern=".", opener=None, pause=time.sleep):
     """Same-host article links on a listing page, through the same policy and robots gates. Nothing is cached."""
     raw, _, _ = get(address, opener, pause)
     host = urlsplit(address).hostname
@@ -255,41 +279,55 @@ def links(address, pattern=".", opener=urlopen, pause=time.sleep):
     return found
 
 
-def get(address, opener=urlopen, pause=time.sleep):
+def get(address, opener=None, pause=time.sleep):
+    """Fetch with policy, robots and rate checks before every request, including redirect hops.
+
+    Injected openers must expose redirects as HTTPError, just like open_once().
+    """
+    opener = opener or open_once
     url(address)
-    parts = urlsplit(address)
-    source = source_for(address)
-    route = POLICY[source]["route"] if source in POLICY else "http" if source else None
-    if route != "http":
-        why = POLICY[source]["why"] if source in POLICY else "host is not in the research source policy"
-        raise Invalid(f"Automated fetch not permitted for {parts.hostname}: {why}")
-    origin = f"{parts.scheme}://{parts.netloc}"
-    robots = robots_for(origin, opener)
-    path = (parts.path or "/") + ("?" + parts.query if parts.query else "")
-    if not robots_allows(robots, path):
-        raise Invalid(f"robots.txt disallows {path} for {AGENT} on {parts.hostname}")
-    wait = max(MIN_INTERVAL, min(robots["delay"] or 0, 30)) - (time.monotonic() - _last.get(origin, -1e9))
-    if wait > 0:
-        pause(wait)
-    _last[origin] = time.monotonic()
-    try:
-        with opener(Request(address, headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"}), timeout=30) as r:
-            final = r.geturl() if hasattr(r, "geturl") else address
-            if urlsplit(final).hostname != parts.hostname:
-                raise Invalid(f"Refusing cross-host redirect to {final}")
-            kind = (r.headers.get("Content-Type") or "").lower()
-            if kind and not any(t in kind for t in ("html", "xml", "text")):
-                raise Invalid(f"Unexpected content type {kind!r}")
-            raw = r.read(MAX_BYTES + 1)
-            status = r.status
-    except HTTPError as e:
-        e.close()
-        raise Invalid(f"HTTP {e.code} from {address}; a failed fetch is not evidence that nothing was published") from None
-    except (URLError, OSError) as e:
-        raise Invalid(f"{type(e).__name__} fetching {address}: {e}") from None
-    if len(raw) > MAX_BYTES:
-        raise Invalid("Page exceeds size limit")
-    return raw, status, source
+    initial_host = urlsplit(address).hostname
+    current = address
+    for hop in range(MAX_REDIRECTS + 1):
+        url(current)
+        parts = urlsplit(current)
+        if parts.hostname != initial_host:
+            raise Invalid(f"Refusing cross-host redirect to {current}")
+        source = source_for(current)
+        route = POLICY[source]["route"] if source in POLICY else "http" if source else None
+        if route != "http":
+            why = POLICY[source]["why"] if source in POLICY else "host is not in the research source policy"
+            raise Invalid(f"Automated fetch not permitted for {parts.hostname}: {why}")
+        origin = f"{parts.scheme}://{parts.netloc}"
+        robots = robots_for(origin, opener, pause)
+        path = (parts.path or "/") + ("?" + parts.query if parts.query else "")
+        if not robots_allows(robots, path):
+            raise Invalid(f"robots.txt disallows {path} for {AGENT} on {parts.hostname}")
+        throttle(origin, pause, robots["delay"])
+        try:
+            with opener(Request(current, headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"}), timeout=30) as r:
+                final = r.geturl() if hasattr(r, "geturl") else current
+                if final != current:
+                    raise Invalid(f"Opener followed an unchecked redirect to {final}")
+                kind = (r.headers.get("Content-Type") or "").lower()
+                if kind and not any(t in kind for t in ("html", "xml", "text")):
+                    raise Invalid(f"Unexpected content type {kind!r}")
+                raw = r.read(MAX_BYTES + 1)
+                status = r.status
+        except HTTPError as e:
+            location = e.headers.get("Location")
+            e.close()
+            if e.code in {301, 302, 303, 307, 308} and location:
+                if hop == MAX_REDIRECTS:
+                    raise Invalid("Too many page redirects") from None
+                current = urljoin(current, location)
+                continue
+            raise Invalid(f"HTTP {e.code} from {current}; a failed fetch is not evidence that nothing was published") from None
+        except (URLError, OSError) as e:
+            raise Invalid(f"{type(e).__name__} fetching {current}: {e}") from None
+        if len(raw) > MAX_BYTES:
+            raise Invalid("Page exceeds size limit")
+        return raw, status, source
 
 
 # Runs inside a normal browser tab on a browser-route page, so the article never leaves the page.

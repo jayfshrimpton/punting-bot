@@ -38,19 +38,19 @@ Most tipster content (Just Horse Racing, Punters, The Daily Punt, Racing.com tip
 
 ## How evidence gets in
 
-1. **Capture.** Do one of:
+1. **Capture.** Redirect destinations are checked against source policy and robots.txt before any request; redirected robots files fail closed. Do one of:
    - `python -m punting.research fetch URL…`: only for sources approved for automated fetching, checked against robots.txt, at most one request every 3 s per host.
    - For browser-only pages: run the script printed by `python -m punting.research checker PACK --page ID` in a normal browser tab.
    - `python -m punting.research links URL --match REGEX` lists same-host article links through the same gates.
 2. **Write a pack** (`imports/research/*.json`, gitignored). Each pack lists:
    - the pages read, with route, observation time and text hash;
    - the claims, each with race, runners, type, stance, topic, conditions, a short summary in our own words, and a verbatim excerpt of at most 20 words.
-3. **`python -m punting.research check PACK`, then `import PACK`.** Import refuses the whole pack if any of these fail:
+3. **`python -m punting.research check PACK`, then `import PACK`.** Both commands run the same full preflight, including coverage, notes and race-start checks, before import writes anything. Import refuses the whole pack if any of these fail:
    - The excerpt isn't verbatim in the captured text (or in the browser receipt).
    - A claimed horse isn't named within 600 characters of the excerpt. This is the wrong-horse guard; it rejected two real claims tonight, which were rewritten against better excerpts.
    - A runner name doesn't match exactly one official runner in that race. Apostrophes and country suffixes are normalised; nothing is fuzzy-matched.
    - The page was observed after the race start, or a publication time is later than the observation.
-   - Researcher inference is written as a source claim, or a note cites something observed after the note.
+   - Researcher inference is written as a source claim, a note is future-dated or has an invalid race number, or a note cites something observed after the note.
 4. **`python -m punting.research digest`** writes `reports/<meeting>/research/<version>/digest.html`.
 
 Rules the digest applies:
@@ -64,11 +64,13 @@ Rules the digest applies:
 
 Captured article text sits in `data/private/pages/` only so excerpts can be re-verified. The plan says full articles shouldn't be retained where permission is unclear, so run `python -m punting.research purge-text` after the weekend. Metadata and hashes stay.
 
+Just Horse Racing, Punters, Wolfden and The Daily Punt are deferred as sources for now, per the user. Their unavailable coverage is informational and does not block the workflow.
+
 ## Race-morning refresh (Sat for Rosehill, Sun for Caulfield)
 
 1. `python -m punting.research weather`: BOM re-issues around 04:15 and 16:00 AEST.
 2. Official track report, rail and scratchings. Track is Soft 5 at Rosehill and Good 4 at Caulfield as of Wednesday's acceptances. Forecasts point to a possible Rosehill upgrade (dry, 34°C Saturday) and a possible Caulfield downgrade (showers Fri–Sat).
-3. The Daily Punt ratings (posted the day before) and its Spring All-Stars bets (due 11:00).
+3. Refresh available Racing.com and supplementary commentary; the four deferred sources above do not need fetching.
 4. Anything you paste from Punters, Just Horse Racing or Wolfden goes in as a `manual` page and shows as UNVERIFIED unless text is captured.
 5. `python -m punting.research digest`, then the main brief.
 
