@@ -1,5 +1,7 @@
 # Paste this into the new Codex project chat
 
+> Update from the user on 23 September 2026: build our own statistical model from Betfair historical data, using their published modelling ideas. Fresh Betfair Hub ratings are optional comparisons, not the source of our predictions. The original text below is retained for context; [MODEL_PROTOCOL.md](MODEL_PROTOCOL.md) and [README.md](README.md) describe the implemented direction.
+
 Build the first version of PuntingPowerAI in this repository. Read and follow the attached `WEEKEND_PROJECT_PLAN.md`. If it has not been copied into this repo, the original is at:
 
 `C:\Users\My PC\Documents\Codex\2026-09-19\continue-my-horse-racing-project-at\outputs\WEEKEND_PROJECT_PLAN.md`

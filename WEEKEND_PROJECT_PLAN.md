@@ -1,5 +1,7 @@
 # PuntingPowerAI — weekend research assistant build plan
 
+> User clarification, 23 September 2026: our own historical statistical model replaces the fresh Betfair Hub baseline. Training is now in scope. Preserve the evidence, chronology, source-access, privacy and no-purchase/no-betting constraints below. See [MODEL_PROTOCOL.md](MODEL_PROTOCOL.md) for the revised modelling specification.
+
 Prepared 23 September 2026 for a new Codex project chat and a GitHub repository the user will create. This document authorises no purchases or bets. It specifies the future build; no assistant application was built in this planning turn.
 
 ## First outcome
