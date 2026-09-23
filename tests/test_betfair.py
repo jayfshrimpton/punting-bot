@@ -28,7 +28,7 @@ def market(start="2026-09-26T02:00:00.000Z",name="R1 1200m Hcap"):
 
 def prices(status="OPEN",inplay=False):
     return {"marketId":"1.23","status":status,"inplay":inplay,"isMarketDataDelayed":True,
-            "runners":[{"selectionId":11,"status":"ACTIVE","ex":{"availableToBack":[{"price":3.5,"size":120.0}]}},
+            "runners":[{"selectionId":11,"status":"ACTIVE","ex":{"availableToBack":[{"price":3.5,"size":120.0}],"availableToLay":[{"price":3.65,"size":40.0}]}},
                        {"selectionId":22,"status":"REMOVED","ex":{"availableToBack":[]}}]}
 
 
@@ -69,7 +69,9 @@ class BetfairTests(unittest.TestCase):
         self.assertEqual(selections,{"a":11,"b":22});self.assertEqual(unmatched,[])
         self.assertEqual(betfair.match([market(start="2026-09-26T03:00:00.000Z")],{1:f}),{})
         other=market();other["runners"][1]["runnerName"]="2. Some Other Horse"
-        self.assertEqual(betfair.match([other],{1:f})[1][2],["SURFIN’ BIRD"])
+        self.assertEqual(betfair.match([other],{1:f})[1][2],["SURFIN’ BIRD (number or name differs on Betfair)"])
+        gone=market();gone["runners"].pop()
+        self.assertIn("not in the Betfair market",betfair.match([gone],{1:f})[1][2][0])
 
     def test_quotes_are_best_back_prices_that_the_store_accepts(self):
         with tempfile.TemporaryDirectory() as root:
@@ -78,14 +80,32 @@ class BetfairTests(unittest.TestCase):
                 f=field();f["id"]=store.add(f,CONFIG)
                 d,reason=betfair.quotes_document(MID,1,f,market(),prices(),{"a":11,"b":22},"2026-09-23T00:01:00+00:00")
                 self.assertIsNone(reason)
-                self.assertEqual(d["payload"]["rows"],[{"runner_id":"a","name":"CROSS TASMAN (NZ)","odds":3.5,"size":120.0}])
+                self.assertEqual(d["payload"]["rows"],[{"runner_id":"a","name":"CROSS TASMAN (NZ)","odds":3.5,"size":120.0,"lay_odds":3.65,"lay_size":40.0}])
                 self.assertEqual(d["payload"]["commission"],.08)
                 store.add(d,CONFIG)
             finally:store.close()
         self.assertEqual(betfair.quotes_document(MID,1,f,market(),prices(inplay=True),{"a":11},OBS)[0],None)
         self.assertEqual(betfair.quotes_document(MID,1,f,market(),prices(status="SUSPENDED"),{"a":11},OBS)[0],None)
+        # A lay offer shorter than the back offer is impossible; fixed odds carry no lay side.
+        bad=json.loads(json.dumps(d));bad["payload"]["rows"][0]["lay_odds"]=3.0
+        fixed=json.loads(json.dumps(d));fixed["payload"].update(market="fixed_win",commission=0)
+        for wrong in (bad,fixed):
+            with tempfile.TemporaryDirectory() as root:
+                store=Store(Path(root)/"data")
+                try:
+                    wrong["payload"]["field_id"]=store.add(field(),CONFIG)
+                    with self.assertRaises(Invalid):store.add(wrong,CONFIG)
+                finally:store.close()
         pending=field("emergency");pending["id"]="f2"
         self.assertIn("emergencies",betfair.quotes_document(MID,1,pending,market(),prices(),{"a":11},OBS)[1])
+
+    def test_market_is_read_only_when_prices_are_tight(self):
+        row=lambda rid,back,lay:{"runner_id":rid,"name":rid,"odds":back,"size":50,"lay_odds":lay,"lay_size":50}
+        view,note=betfair.market_view([row("a",1.95,2.0),row("b",2.0,2.06),row("c",60,80)])
+        self.assertAlmostEqual(sum(view.values()),1);self.assertGreater(view["a"],view["b"]);self.assertIn("book",note)
+        # Early placeholder backs such as 1.16 against a lay of 30 are not prices.
+        self.assertIsNone(betfair.market_view([row("a",1.16,30),row("b",2.0,2.06)])[0])
+        self.assertIsNone(betfair.market_view([row("a",4,4.2),row("b",4,4.2)])[0])
 
 
 if __name__=="__main__":unittest.main()

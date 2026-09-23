@@ -25,7 +25,12 @@ HORSE_RACING = "7"
 # Official venue names that Betfair shortens.
 VENUES = {"Rosehill Gardens": "Rosehill"}
 START_TOLERANCE_MINUTES = 10
-TERMS = "Best available back price and size; delayed API key (1-180 s); commission is the market base rate, before any personal discount"
+TERMS = "Best available back and lay prices and sizes; delayed API key (1-180 s); commission is the market base rate, before any personal discount"
+# A runner's price is readable only when its lay offer is within 25% of its back offer.
+# Early markets post placeholder backs (e.g. 1.16 against a lay of 30) that are not prices.
+MAX_SPREAD = 1.25
+READABLE_BOOK = (.9, 1.1)
+LONGSHOT = 20
 
 
 def settings(path=".env"):
@@ -114,7 +119,7 @@ def plain_name(runner_name):
 
 
 def match(markets, fields):
-    """Official race number -> (market, {official runner id: selection id}, unmatched official names).
+    """Official race number -> (market, {official runner id: selection id}, unmatched runners with a reason).
     A market must agree on race number and start time; a runner on saddlecloth number and name. No fuzzy joins."""
     matched = {}
     for market in markets:
@@ -134,8 +139,11 @@ def match(markets, fields):
                      and history_key(plain_name(s["runnerName"])) == history_key(runner["name"])]
             if len(found) == 1:
                 selections[runner["id"]] = found[0]
+            elif any(str((s.get("metadata") or {}).get("CLOTH_NUMBER", "")).strip() == runner["number"].rstrip("e")
+                     or history_key(plain_name(s["runnerName"])) == history_key(runner["name"]) for s in market.get("runners", [])):
+                unmatched.append(f"{runner['name']} (number or name differs on Betfair)")
             else:
-                unmatched.append(runner["name"])
+                unmatched.append(f"{runner['name']} (not in the Betfair market: scratched, or an emergency without a start)")
         matched[int(number[1])] = (market, selections, unmatched)
     return matched
 
@@ -160,8 +168,10 @@ def quotes_document(meeting_id, race_no, field, market, prices, selections, obse
     for runner_id, selection in selections.items():
         runner = by_selection.get(selection)
         back = (runner or {}).get("ex", {}).get("availableToBack") or []
+        lay = (runner or {}).get("ex", {}).get("availableToLay") or []
         if runner and runner.get("status") == "ACTIVE" and back:
-            rows.append({"runner_id": runner_id, "name": names[runner_id], "odds": back[0]["price"], "size": back[0]["size"]})
+            rows.append({"runner_id": runner_id, "name": names[runner_id], "odds": back[0]["price"], "size": back[0]["size"],
+                         "lay_odds": lay[0]["price"] if lay else None, "lay_size": lay[0]["size"] if lay else None})
     if not rows:
         return None, "no back prices yet"
     rate = (market.get("description") or {}).get("marketBaseRate")
@@ -170,6 +180,24 @@ def quotes_document(meeting_id, race_no, field, market, prices, selections, obse
             "publisher": "Betfair Exchange API", "observed_at": observed, "published_at": None,
             "payload": {"field_id": field["id"], "provider": "Betfair Exchange", "market": "exchange_back_win",
                         "commission": rate/100 if rate is not None else None, "terms": TERMS, "rows": rows}}, None
+
+
+def market_view(rows):
+    """Market probability per runner from back/lay midpoints, or (None, reason) when the market is too thin to read.
+    Readable means every runner shorter than 20.0 has a tight spread and the midpoint book sums to 90-110%."""
+    mids, loose = {}, []
+    for r in rows:
+        lay = r.get("lay_odds")
+        if lay and lay/r["odds"] <= MAX_SPREAD:
+            mids[r["runner_id"]] = (1/r["odds"] + 1/lay)/2
+        elif r["odds"] < LONGSHOT:
+            loose.append(r["name"])
+    total = sum(mids.values())
+    if loose:
+        return None, f"too thin to read: no tight price for {len(loose)} runner{'s' if len(loose) > 1 else ''} under {LONGSHOT:g}"
+    if not READABLE_BOOK[0] <= total <= READABLE_BOOK[1]:
+        return None, f"too thin to read: midpoint book {total:.0%}"
+    return {k: v/total for k, v in mids.items()}, f"midpoint book {total:.0%}"
 
 
 def run(store, config, values, token, save):
