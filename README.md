@@ -25,7 +25,17 @@ Reports are immutable, dated folders under `reports/<meeting>/`, containing `bri
 .\.venv\Scripts\python.exe -m punting project
 ```
 
-The download command fetches only the fixed free public Betfair archive list: 2024–August 2026. It caches and verifies original hashes, with no account, purchase or API charge. `train` fits a conditional logistic model with race probabilities summing to one, evaluates chronological splits and saves a versioned model and analysis under `data/model/`. `project` runs that model against the latest official fields, creating explicitly **experimental** projections. Missing September history and model-quality limitations remain visible and disable actionable candidates. Races with unresolved emergencies are skipped; every runner still appears in the report.
+The download command fetches only the fixed free public Betfair archive list: 2024–August 2026. It caches and verifies original hashes, with no account, purchase or API charge. `train` fits a conditional logistic model with race probabilities summing to one, evaluates chronological splits and saves a versioned model and analysis under `data/model/`. `project` creates explicitly **experimental** projections for every active and emergency runner. Emergency-inclusive ratings assume the entire declared field runs; emergencies may not start and scratchings require recalculation. History-cutoff and model-quality limitations remain visible and disable actionable candidates.
+
+Refresh September horse histories without refitting the model:
+
+```powershell
+.\.venv\Scripts\python.exe -m punting.history_recent --through 2026-09-22
+.\.venv\Scripts\python.exe -m punting project
+.\.venv\Scripts\python.exe -m punting report
+```
+
+This uses free daily Betfair WIN files, filters racing codes and validates dates, tracks and complete markets. The first refresh accepted 944 races through 22 September; two markets failed validation. Raw files and hashes are under `data/history-september/`. Fitted weights and prior evaluation stay unchanged. Repeated refreshes rebuild from the August parent to avoid duplicate starts. The adapter currently supports completed September 2026 days only; a requested cutoff is not a guarantee that source coverage is complete.
 
 The model uses each horse's earlier race results and earlier BSP as a market-informed ability proxy. It does not use the current race's result or BSP. It is not a reproduction of Betfair's proprietary Punting Form model and does not yet include sectional, trainer or jockey features. Betfair's archive names have no country suffixes or punctuation, so official names match exactly first, then with those removed; such matches are listed in the report for identity checks. Unmatched or ambiguous names get a visibly flagged cold-start prior. Betfair selection IDs are not assumed to persist across starts.
 

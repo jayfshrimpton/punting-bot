@@ -1,5 +1,7 @@
 # Research side — sources, evidence and digests
 
+Update, 23 Sep 2026 evening: browser retries now open both Just Horse Racing and Punters. Both JHR weekend card previews and Punters' free Astral Flame article were read; 19 short claims were imported. JHR's Caulfield R6 selection is spelled `Diamater`, unlike official `DIAMETER`; that runner attribution was withheld rather than fuzzy-matched. The earlier blocked statuses below describe the first pass and are superseded by the new coverage records. Subscription-page access has not been established. Popularity and trainer access bias commentary volume: counts must never be treated as winning chances, and silence is not negative evidence.
+
 State at 23 Sep 2026, 19:50 AEST. The model, prices and the main brief (`python -m punting report`) belong to the model workstream. This covers the research: which sources we can read and how, turning what they say into verified evidence, and a per-race research digest. Everything goes into the same append-only store, so the main brief shows it too.
 
 Nothing here places bets, logs in, bypasses a block, or fetches a path that a site's robots.txt disallows.

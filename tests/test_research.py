@@ -102,6 +102,24 @@ class ResearchTests(unittest.TestCase):
         sid=self.store.add(d,CONFIG);m=self.model();m["observed_at"]="2026-09-23T00:00:02+00:00";m["payload"]["field_id"]=sid
         with self.assertRaises(Invalid):self.store.add(m,CONFIG)
 
+    def test_explicit_emergency_scenario_rates_every_runner_but_never_candidates(self):
+        d=field();d["observed_at"]="2026-09-23T00:00:01+00:00";d["payload"]["runners"][1]["status"]="emergency"
+        sid=self.store.add(d,CONFIG);m=self.model();m["observed_at"]="2026-09-23T00:00:02+00:00"
+        m["payload"].update(field_id=sid,experimental=True,includes_emergencies=True)
+        self.store.add(m,CONFIG)
+        a=self.assessment()
+        self.assertAlmostEqual(sum(r['p'] for r in a['rows']),1)
+        self.assertEqual(a['rows'][1]['state'],'emergency')
+        self.assertEqual(a['rows'][1]['p'],.5)
+        self.assertTrue(any('emergencies' in x for x in a['issues']))
+        self.assertFalse(any(r['state']=='candidate for human review' for r in a['rows']))
+        m['payload']['rows'].pop()
+        with self.assertRaises(Invalid):self.store.add(m,CONFIG)
+        m=self.model();m['payload'].update(includes_emergencies=True,experimental=False)
+        with self.assertRaises(Invalid):self.store.add(m,CONFIG)
+        q=self.quotes();q['observed_at']='2026-09-23T00:00:03+00:00';q['payload']['field_id']=sid
+        with self.assertRaises(Invalid):self.store.add(q,CONFIG)
+
     def test_cutoff_and_outcome_boundary(self):
         m=self.model();m["observed_at"]="2026-09-23T00:05:00+00:00";self.store.add(m,CONFIG)
         self.assertIsNone(self.assessment()["model"])

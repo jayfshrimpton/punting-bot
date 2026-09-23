@@ -1,5 +1,6 @@
 """PuntingPowerAI History v1. Prior-day features; race-level conditional logit."""
 import csv
+import copy
 import hashlib
 import io
 import json
@@ -49,7 +50,7 @@ def meeting_day(value):
         return datetime.strptime(value, "%d/%m/%Y").date()
 
 
-def load_races(root):
+def load_races(root, through=date(2026,8,31)):
     grouped = defaultdict(list)
     exclusions = Counter()
     for r in archive_rows(root):
@@ -94,7 +95,7 @@ def load_races(root):
             day = meeting_day(rows[0]["LOCAL_MEETING_DATE"])
         except (ValueError,TypeError):
             exclusions["invalid_date"] += 1; continue
-        if not date(2024,1,1)<=day<=date(2026,8,31):
+        if not date(2024,1,1)<=day<=through:
             exclusions["outside_protocol_dates"] += 1; continue
         rows.sort(key=lambda r:r["SELECTION_ID"])
         total = sum(1/r["bsp"] for r in rows)
@@ -117,8 +118,8 @@ def features(history, day, distance):
             math.log1p(min(days,730)),min(abs(distance-recent[-1]["distance"])/1000,5),0]
 
 
-def build_features(races):
-    history = {}
+def build_features(races, initial_history=None):
+    history = copy.deepcopy(initial_history) if initial_history is not None else {}
     by_day = defaultdict(list)
     for race in races:
         by_day[race["date"]].append(race)
@@ -322,10 +323,9 @@ def project(store, config, artifact_path):
         for n,field in sorted(latest.items()):
             if stamp(now())>=stamp(field["payload"]["start_at"]):
                 output.append(f"{meeting['id']} R{n}: skipped, race started");continue
-            if any(r["status"]=="emergency" for r in field["payload"]["runners"]):
-                output.append(f"{meeting['id']} R{n}: skipped, emergency starters unresolved");continue
+            emergencies=any(r["status"]=="emergency" for r in field["payload"]["runners"])
             distance=re_distance(field["payload"]["race_name"])
-            active=[r for r in field["payload"]["runners"] if r["status"]=="active"]
+            active=[r for r in field["payload"]["runners"] if r["status"] in {"active", "emergency"}]
             x=[];unknown=[];loose=[]
             for r in active:
                 key=keys[r["id"]]
@@ -333,12 +333,14 @@ def project(store, config, artifact_path):
                 elif key!=namekey(r["name"]):loose.append(f"{r['name']} as {key}")
                 x.append(features(history[key] if key else None,meeting["date"],distance))
             probs=predict(model,x)
-            limits=[f"History ends {model['history_through']}; September starts are missing", "Baseline is weaker than the hindsight market benchmark; no demonstrated edge"]
+            limits=[f"History ends {model['history_through']}; later starts are not included", "Baseline is weaker than the hindsight market benchmark; no demonstrated edge"]
+            limits.extend(model.get('history_refresh_limitations', []))
+            if emergencies:limits.append("Provisional full-field scenario: all emergencies included as if starting; they may not race. Recalculate after scratchings.")
             if unknown:limits.append("Cold-start prior (no unique historical name match): "+", ".join(unknown))
             if loose:limits.append("Matched to history without country suffix or punctuation (check identity): "+", ".join(loose))
             observed=now()
             d={"kind":"model","meeting_id":meeting["id"],"race_no":n,"source_url":"https://github.com/jayfshrimpton/punting-bot", "publisher":"PuntingPowerAI local statistical model", "observed_at":observed,"published_at":None,
-               "payload":{"field_id":field["id"],"model":model["name"],"version":sid,"experimental":True,"limitations":limits,
+               "payload":{"field_id":field["id"],"model":model["name"],"version":sid,"experimental":True,"includes_emergencies":emergencies,"limitations":limits,
                           "rows":[{"runner_id":r["id"],"name":r["name"],"rated_price":1/p} for r,p in zip(active,probs)]}}
             snapshot=store.add(d,config)
             output.append(f"{meeting['id']} R{n}: experimental projection {snapshot[:12]}, {len(unknown)} cold starts, {len(loose)} suffix/punctuation-free matches")
