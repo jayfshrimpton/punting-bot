@@ -4,9 +4,11 @@ import hashlib
 import io
 import json
 import math
+import re
+import unicodedata
 import zipfile
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +39,14 @@ def archive_rows(root):
         else:
             with path.open(encoding="utf-8-sig",newline="") as f:
                 yield from csv.DictReader(f)
+
+
+def meeting_day(value):
+    # The April 2025 archive writes D/MM/YYYY; every other file is ISO.
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return datetime.strptime(value, "%d/%m/%Y").date()
 
 
 def load_races(root):
@@ -77,11 +87,15 @@ def load_races(root):
                 r["distance"] = float(r["DISTANCE"])
                 if not math.isfinite(r["bsp"]) or r["bsp"]<=1 or not 400<=r["distance"]<=8000:
                     raise ValueError()
-            day = date.fromisoformat(rows[0]["LOCAL_MEETING_DATE"])
-            if not date(2024,1,1)<=day<=date(2026,8,31):
-                raise ValueError()
         except (ValueError,TypeError):
-            exclusions["invalid_price_distance_or_date"] += 1; continue
+            exclusions["invalid_price_or_distance"] += 1; continue
+        # Count date failures separately so an archive format change cannot hide under a price label.
+        try:
+            day = meeting_day(rows[0]["LOCAL_MEETING_DATE"])
+        except (ValueError,TypeError):
+            exclusions["invalid_date"] += 1; continue
+        if not date(2024,1,1)<=day<=date(2026,8,31):
+            exclusions["outside_protocol_dates"] += 1; continue
         rows.sort(key=lambda r:r["SELECTION_ID"])
         total = sum(1/r["bsp"] for r in rows)
         if not .8<=total<=1.2:
@@ -213,7 +227,7 @@ def evaluate(model,races):
 def train(root="data/history",output="data/model"):
     root=Path(root);output=Path(output);output.mkdir(parents=True,exist_ok=True)
     races,excluded=load_races(root)
-    print(f"Validated {len(races):,} races; building strictly lagged features",flush=True)
+    print(f"Validated {len(races):,} races; excluded {json.dumps(excluded,sort_keys=True)}; building strictly lagged features",flush=True)
     races,history=build_features(races)
     training=[r for r in races if "2025-01-01"<=r["date"]<"2026-06-01"]
     validation=[r for r in races if "2026-06-01"<=r["date"]<"2026-07-01"]
@@ -222,7 +236,7 @@ def train(root="data/history",output="data/model"):
         raise Invalid("Insufficient chronological data for the frozen protocol")
     model=fit(training)
     print(f"Fit converged in {model['iterations']} iterations; evaluating chronological splits",flush=True)
-    model.update({"schema":SCHEMA,"name":"PuntingPowerAI History v1.1","created_at":now(),"trained_through":"2026-05-31","history_through":max(r["date"] for r in races),"sources":json.loads((root/"manifest.json").read_text()),"protocol_sha256":hashlib.sha256(Path("MODEL_PROTOCOL.md").read_bytes()).hexdigest(),"live_approved":False})
+    model.update({"schema":SCHEMA,"name":"PuntingPowerAI History v1.2","created_at":now(),"trained_through":"2026-05-31","history_through":max(r["date"] for r in races),"sources":json.loads((root/"manifest.json").read_text()),"protocol_sha256":hashlib.sha256(Path("MODEL_PROTOCOL.md").read_bytes()).hexdigest(),"live_approved":False})
     metrics={"training_races":len(training),"excluded":excluded,"validation":evaluate(model,validation),"diagnostic_not_holdout":evaluate(model,diagnostic)}
     artifact={"model":model,"metrics":metrics,"history":history}
     sid=digest(artifact)
@@ -252,8 +266,35 @@ def render_model(model,metrics,sid):
         if b["runners"]:lines.append(f"| {b['range']} | {b['runners']} | {b['mean_p']:.3f} | {b['win_rate']:.3f} |")
     lines += ["", "## Fitted feature weights", "", "Standardised coefficients are associations, not causal effects.","", "| Feature | Weight |", "|---|---:|"]
     lines += [f"| {name} | {w:.5f} |" for name,w in zip(FEATURES,model["weights"])]
-    lines += ["", "## Limitations", "", "Previous-race market prices supply a proxy for ability. This omits sectional, jockey, trainer, going and class features used in richer form models. Historical exports have no original publication audit; lagging by a whole day is an explicit availability assumption. Race completeness is checked through settlement and BSP consistency, but these checks are not equivalent to an independently archived official field.","", "Cross-race history uses exact normalised horse names, retaining country suffixes. Betfair selection IDs proved unstable across starts in this archive. Same-day duplicate names are not merged. Name reuse, spelling changes and missing country suffixes remain identity limitations; there is no authoritative cross-provider horse ID mapping yet.","", "No current-race BSP or result enters a feature. Scaling and coefficients are fitted only on training races. Outcomes update history only after every race on that date has been featurised. This is our fitted model, not a copy of Betfair's proprietary model.","", "Exclusions: "+json.dumps(metrics["excluded"],sort_keys=True),""]
+    lines += ["", "## Limitations", "", "Previous-race market prices supply a proxy for ability. This omits sectional, jockey, trainer, going and class features used in richer form models. Historical exports have no original publication audit; lagging by a whole day is an explicit availability assumption. Race completeness is checked through settlement and BSP consistency, but these checks are not equivalent to an independently archived official field.","", "Cross-race history uses exact normalised archive names, which carry no country suffix or punctuation. Betfair selection IDs proved unstable across starts in this archive. Same-day duplicate names are not merged. Official names are matched exactly first, then without suffix and punctuation; those matches are flagged for identity checks. Name reuse, spelling changes and local/imported horses sharing a name remain identity limitations; there is no authoritative cross-provider horse ID mapping yet.","", "No current-race BSP or result enters a feature. Scaling and coefficients are fitted only on training races. Outcomes update history only after every race on that date has been featurised. This is our fitted model, not a copy of Betfair's proprietary model.","", "Exclusions: "+json.dumps(metrics["excluded"],sort_keys=True),""]
     return "\n".join(lines)
+
+
+def history_key(name):
+    # Archive names carry no country suffix, punctuation or accents: official
+    # "CROSS TASMAN (NZ)" and "SURFIN’ BIRD" are archived as "Cross Tasman" and "Surfin Bird".
+    plain=unicodedata.normalize("NFKD",namekey(name)).encode("ascii","ignore").decode()
+    return re.sub(r"[^A-Z0-9]","",re.sub(r"\s*\([A-Z]{2,3}\)$","",plain))
+
+
+def history_index(history):
+    index=defaultdict(set)
+    for key in history:index[history_key(key)].add(key)
+    return index
+
+
+def match_history(names, history, index):
+    """Archive history key for each official name: exact first, then suffix/punctuation-free.
+    Ambiguous names, and different runners resolving to one history, get the cold-start prior."""
+    keys=[]
+    for name in names:
+        key=namekey(name)
+        if key not in history:
+            matches=index.get(history_key(name),set())
+            key=next(iter(matches)) if len(matches)==1 else None
+        keys.append(key)
+    counts=Counter(keys)
+    return [key if key is not None and counts[key]==1 else None for key in keys]
 
 
 def project(store, config, artifact_path):
@@ -267,9 +308,7 @@ def project(store, config, artifact_path):
     if model["schema"]!=SCHEMA:
         raise Invalid("Unsupported feature schema")
     from .core import stamp
-    names=defaultdict(set)
-    for horse_id,h in artifact["history"].items():
-        for n in h["names"]:names[namekey(n)].add(horse_id)
+    history=artifact["history"];index=history_index(history)
     output=[]
     for meeting in config["meetings"]:
         if model["history_through"]>=meeting["date"] or model["trained_through"]>=meeting["date"]:
@@ -277,6 +316,9 @@ def project(store, config, artifact_path):
         latest={}
         for d in store.all(meeting["id"]):
             if d["kind"]=="field":latest[d["race_no"]]=d
+        # Match the whole meeting at once so two different horses cannot share one history.
+        runners={r["id"]:r["name"] for f in latest.values() for r in f["payload"]["runners"] if r["status"]!="scratched"}
+        keys=dict(zip(runners,match_history(list(runners.values()),history,index)))
         for n,field in sorted(latest.items()):
             if stamp(now())>=stamp(field["payload"]["start_at"]):
                 output.append(f"{meeting['id']} R{n}: skipped, race started");continue
@@ -284,26 +326,26 @@ def project(store, config, artifact_path):
                 output.append(f"{meeting['id']} R{n}: skipped, emergency starters unresolved");continue
             distance=re_distance(field["payload"]["race_name"])
             active=[r for r in field["payload"]["runners"] if r["status"]=="active"]
-            x=[];unknown=[]
+            x=[];unknown=[];loose=[]
             for r in active:
-                matches=names.get(namekey(r["name"]),set())
-                h=artifact["history"][next(iter(matches))] if len(matches)==1 else None
-                if h is None:unknown.append(r["name"])
-                x.append(features(h,meeting["date"],distance))
+                key=keys[r["id"]]
+                if key is None:unknown.append(r["name"])
+                elif key!=namekey(r["name"]):loose.append(f"{r['name']} as {key}")
+                x.append(features(history[key] if key else None,meeting["date"],distance))
             probs=predict(model,x)
             limits=[f"History ends {model['history_through']}; September starts are missing", "Baseline is weaker than the hindsight market benchmark; no demonstrated edge"]
-            if unknown:limits.append("Cold-start prior (no unique exact historical name match): "+", ".join(unknown))
+            if unknown:limits.append("Cold-start prior (no unique historical name match): "+", ".join(unknown))
+            if loose:limits.append("Matched to history without country suffix or punctuation (check identity): "+", ".join(loose))
             observed=now()
             d={"kind":"model","meeting_id":meeting["id"],"race_no":n,"source_url":"https://github.com/jayfshrimpton/punting-bot", "publisher":"PuntingPowerAI local statistical model", "observed_at":observed,"published_at":None,
                "payload":{"field_id":field["id"],"model":model["name"],"version":sid,"experimental":True,"limitations":limits,
                           "rows":[{"runner_id":r["id"],"name":r["name"],"rated_price":1/p} for r,p in zip(active,probs)]}}
             snapshot=store.add(d,config)
-            output.append(f"{meeting['id']} R{n}: experimental projection {snapshot[:12]}, {len(unknown)} cold starts")
+            output.append(f"{meeting['id']} R{n}: experimental projection {snapshot[:12]}, {len(unknown)} cold starts, {len(loose)} suffix/punctuation-free matches")
     return output
 
 
 def re_distance(title):
-    import re
     match=re.search(r"\((\d+) METRES\)",title)
     if not match:raise Invalid("No verified race distance in official field")
     return int(match[1])

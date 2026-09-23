@@ -12,6 +12,16 @@
 
 ## Corrected model result
 
+> **Correction, 23 September 2026 (v1.2).** The v1.1 run below had two defects. It silently excluded every April 2025 race, because that archive file writes dates as D/MM/YYYY. It also required exact official-name matches, so 51 of the 226 active weekend runners with a country suffix or an apostrophe became cold starts. After retraining with both fixed:
+>
+> - 24,056 training races.
+> - July–August model log loss 2.0788 (equal chance 2.2465, BSP 1.7751).
+> - Top-pick win rate 23.8%.
+> - BSP paper return −2.58% at 5% commission (95% interval −13.26% to +8.24%), and −4.91% at 8%.
+> - Cold starts in the 14 projected weekend races fall from 36 to 2.
+>
+> One extra month of training moved the return estimate by 2.6 points, well inside its interval. Treat it as noise, not break-even. The v1.1 figures below are kept for the record and are superseded; retrain and re-project before use.
+
 PuntingPowerAI History v1.1 trained on **22,603 races** from January 2025 through May 2026, after using 2024 as a history warm-up. June validation contains 1,386 races. July–August diagnostics contain 2,834 races and are **not an untouched holdout**.
 
 | July–August diagnostic | Result |

@@ -1,6 +1,10 @@
 import copy
+import hashlib
+import json
+import tempfile
 import unittest
-from punting.model import build_features, features, fit, predict
+from pathlib import Path
+from punting.model import build_features, features, fit, history_index, load_races, match_history, predict
 from punting.core import Invalid
 
 
@@ -45,6 +49,25 @@ class ModelTests(unittest.TestCase):
         altered=copy.deepcopy(data[-1]["x"]);altered[0][0]=1e6
         before=copy.deepcopy(model);predict(model,altered)
         self.assertEqual(before,model)
+
+    def test_official_names_match_suffix_free_archive_names(self):
+        history={k:{} for k in ["CROSS TASMAN","SURFIN BIRD","ALABAMA STATE","ZAMBARDO","SUN SHINE","SUNSHINE"]}
+        index=history_index(history)
+        self.assertEqual(match_history(["CROSS TASMAN (NZ)","SURFIN’ BIRD","Alabama State","FRESHMAN (NZ)","SUN-SHINE"],history,index),
+                         ["CROSS TASMAN","SURFIN BIRD","ALABAMA STATE",None,None])
+        # The archive drops suffixes, so a local and an imported horse sharing a name cannot be told apart.
+        self.assertEqual(match_history(["ZAMBARDO","ZAMBARDO (NZ)"],history,index),[None,None])
+
+    def test_day_first_archive_dates_are_loaded_and_bad_dates_counted(self):
+        header="LOCAL_MEETING_DATE,TRACK,STATE_CODE,RACE_NO,WIN_MARKET_ID,RACING_TYPE,DISTANCE,SELECTION_ID,SELECTION_NAME,WIN_RESULT,WIN_BSP\n"
+        rows="".join(f"{day},Synthetic,NSW,1,{mid},Thoroughbred,1200,{sid},{sid},{result},2\n" for day,mid in [("1/04/2025","m1"),("April 2025","m2")] for sid,result in [("A","WINNER"),("B","LOSER")])
+        with tempfile.TemporaryDirectory() as root:
+            data=(header+rows).encode()
+            Path(root,"sample.csv").write_bytes(data)
+            Path(root,"manifest.json").write_text(json.dumps([{"name":"sample.csv","sha256":hashlib.sha256(data).hexdigest()}]))
+            races,excluded=load_races(root)
+        self.assertEqual([r["date"] for r in races],["2025-04-01"])
+        self.assertEqual(excluded,{"invalid_date":1})
 
 
 if __name__=="__main__":unittest.main()
