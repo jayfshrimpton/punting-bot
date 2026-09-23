@@ -115,7 +115,7 @@ def validate(d, config):
                 url(r["official_url"])
     elif kind in {"model", "quotes"}:
         required = ("field_id", "rows", "model", "version") if kind == "model" else ("field_id", "rows", "provider", "market", "commission", "terms")
-        keys(p, required, ("limitations", "experimental") if kind == "model" else ())
+        keys(p, required, ("limitations", "experimental", "includes_emergencies") if kind == "model" else ())
         text(p["field_id"], "field_id")
         if not isinstance(p["rows"], list) or not p["rows"]:
             raise Invalid("Empty numeric snapshot")
@@ -123,6 +123,10 @@ def validate(d, config):
             text(p["model"], "model identity")
             if "experimental" in p and type(p["experimental"]) is not bool:
                 raise Invalid("experimental must be boolean")
+            if "includes_emergencies" in p and type(p["includes_emergencies"]) is not bool:
+                raise Invalid("includes_emergencies must be boolean")
+            if p.get("includes_emergencies") and not p.get("experimental"):
+                raise Invalid("Emergency-inclusive ratings must be experimental")
             if "limitations" in p and (not isinstance(p["limitations"], list) or not all(isinstance(x,str) for x in p["limitations"])):
                 raise Invalid("limitations must be a list of strings")
             if p["version"] is not None:

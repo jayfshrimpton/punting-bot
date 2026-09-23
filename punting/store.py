@@ -46,8 +46,9 @@ class Store:
                 if based is None:
                     raise Invalid("Numeric data refers to a missing, future or wrong-race field")
                 runners = {r["id"]: r for r in based["payload"]["runners"]}
-                active = {rid for rid, r in runners.items() if r["status"] == "active"}
-                if any(r["status"] == "emergency" for r in runners.values()):
+                include_emergencies = d["kind"] == "model" and p.get("includes_emergencies", False)
+                active = {rid for rid, r in runners.items() if r["status"] == "active" or (include_emergencies and r["status"] == "emergency")}
+                if any(r["status"] == "emergency" for r in runners.values()) and not include_emergencies:
                     raise Invalid("Resolve emergency starters before importing a numeric field")
                 ids = {r["runner_id"] for r in p["rows"]}
                 if not ids <= active or (d["kind"] == "model" and ids != active):

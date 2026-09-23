@@ -32,6 +32,8 @@ def assess(field, docs, cutoff, config):
     probs={}
     total=None
     if model:
+        if model["payload"].get("includes_emergencies"):
+            issues.append("Full declared field assumed: emergencies are rated but may not start; recalculate after scratchings")
         issues.extend(model["payload"].get("limitations", []))
         if model["payload"].get("experimental"):
             issues.append("Experimental model: numerical research only; candidates disabled")
