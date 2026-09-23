@@ -37,7 +37,15 @@ Refresh September horse histories without refitting the model:
 
 This uses free daily Betfair WIN files, filters racing codes and validates dates, tracks and complete markets. The first refresh accepted 944 races through 22 September; two markets failed validation. Raw files and hashes are under `data/history-september/`. Fitted weights and prior evaluation stay unchanged. Repeated refreshes rebuild from the August parent to avoid duplicate starts. The adapter currently supports completed September 2026 days only; a requested cutoff is not a guarantee that source coverage is complete.
 
-The model uses each horse's earlier race results and earlier BSP as a market-informed ability proxy. It does not use the current race's result or BSP. It is not a reproduction of Betfair's proprietary Punting Form model and does not yet include sectional, trainer or jockey features. Betfair's archive names have no country suffixes or punctuation, so official names match exactly first, then with those removed; such matches are listed in the report for identity checks. Unmatched or ambiguous names get a visibly flagged cold-start prior. Betfair selection IDs are not assumed to persist across starts.
+The model uses each horse's earlier race results and earlier BSP as a market-informed ability proxy. From v1.3, it also estimates the class of each earlier field from its runners' prior market-implied ratings, counts New Zealand starts as form, and decays old wins with a one-year half-life. It does not use the current race's result or BSP. It is not a reproduction of Betfair's proprietary Punting Form model and does not yet include sectional, trainer or jockey features. Betfair's archive names have no country suffixes or punctuation, so official names match exactly first, then with those removed; such matches are listed in the report for identity checks. Unmatched or ambiguous names get a visibly flagged cold-start prior. Betfair selection IDs are not assumed to persist across starts.
+
+Check whether the model adds anything to the market before reading a model/market gap as value:
+
+```powershell
+.\.venv\Scripts\python.exe -m punting.blend_check
+```
+
+For v1.3 the model's blend weight is about zero against both BSP and the best back price at the scheduled off. It currently adds no information beyond the market, so an apparent overlay is not evidence of value.
 
 July–August has already been inspected and is labelled a diagnostic, never an untouched holdout. Training ends May 2026; June is development validation. See the protocol for features, split bounds, fixed regularisation and settlement assumptions.
 
